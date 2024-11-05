@@ -1,151 +1,121 @@
+from dotenv import load_dotenv
+from datetime import timedelta, datetime
 import streamlit as st
 import pandas as pd
 import math
 from pathlib import Path
+import firebase_admin
+from firebase_admin import credentials, db
+import os
+import json
+import requests
+
+
+
+load_dotenv()
+
+
+# Initialize Firebase
+if not firebase_admin._apps:
+    #cred = credentials.Certificate("vyshnevetskyi-data-engineering-firebase-adminsdk-836jz-b41fb4f91d.json")
+    cred_dict = json.loads(os.environ['FIREBASE_SERVICE_ACCOUNT_CREDENTIAL'])
+    cred = credentials.Certificate(cred_dict)
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': 'https://vyshnevetskyi-data-engineering-default-rtdb.europe-west1.firebasedatabase.app/'
+    })
+
 
 # Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+    page_title='Metal Prices Dashboard',
+    page_icon=':earth_americas:',
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
+# Function to fetch metal data from Firebase
 @st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def get_metal_data_from_firebase():
+    ref = db.reference('/')
+    metal_data = ref.get()
+    
+    print("Raw data from Firebase:", metal_data)  # Debug print
+    
+    if metal_data:
+        df_metal = pd.DataFrame(metal_data)
+        print("DataFrame shape:", df_metal.shape)  # Debug print
+        print("DataFrame columns:", df_metal.columns)  # Debug print
+        df_metal['Date'] = pd.to_datetime(df_metal['Date']).dt.date
+        return df_metal
+    else:
+        print("No metal data found in Firebase.")
+        return pd.DataFrame()
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# Load metal data
+metal_df = get_metal_data_from_firebase()
+print("Metal DataFrame:")
+print(metal_df.head())
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+# Set the title that appears at the top of the page
+st.title(':earth_americas: Metal Prices Dashboard')
+st.write("Explore historical data on precious metals prices.")
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# Add a date range slider
+min_date = metal_df['Date'].min()
+max_date = metal_df['Date'].max()
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+from_date, to_date = st.slider(
+    'Select date range:',
+    min_value=min_date,
+    max_value=max_date,
+    value=[min_date, max_date]
+)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
+# Select metals to view
+metal_columns = [
+    'Gold AM Fix', 'Gold PM Fix', 'Silver Fix', 'Platinum AM Fix', 
+    'Platinum PM Fix', 'Palladium AM Fix', 'Palladium PM Fix', 
+    'Iridium', 'Ruthenium', 'Rhodium'
 ]
 
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+selected_metals = st.multiselect(
+    'Select metals to view:',
+    metal_columns,
+    default=['Gold AM Fix', 'Gold PM Fix', 'Silver Fix']
 )
 
-''
-''
+# Filter data based on selections
+filtered_df = metal_df[
+    (metal_df['Date'] >= from_date) & (metal_df['Date'] <= to_date)
+]
+
+# Ensure selected metals are numeric
+filtered_df[selected_metals] = filtered_df[selected_metals].apply(pd.to_numeric, errors='coerce')
+
+# Drop any columns that are entirely NaN
+filtered_df = filtered_df.dropna(axis=1, how='all')
+
+# Plotting line chart if there are any valid columns
+if not filtered_df[selected_metals].empty:
+    st.header('Metal Prices Over Time')
+    st.line_chart(filtered_df.set_index('Date')[selected_metals])
+else:
+    st.warning("No valid data available for the selected metals.")
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+print("Filtered DataFrame shape:", filtered_df.shape)
+print("Filtered DataFrame head:", filtered_df.head())
 
-st.header(f'GDP in {to_year}', divider='gray')
 
-''
+from_dateA, to_dateB = st.slider(
+    'Select date range:',
+    min_value=min_date,
+    max_value=max_date,
+    value=[min_date, max_date],
+    key="date_slider"
+)
+filtered_df = filtered_df[
+    (filtered_df['Date'] >= from_dateA) & (filtered_df['Date']<= to_dateB)
+]
+st.subheader('Filtered Data')
+st.dataframe(filtered_df[['Date'] + selected_metals])
 
-cols = st.columns(4)
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
